@@ -12,6 +12,12 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+POSITION_RE = re.compile(r"^/api/positions$")
+CORPORATE_ACTIONS_RE = re.compile(r"^/api/corporate-actions$")
+CORPORATE_ACTION_RE = re.compile(r"^/api/corporate-actions/(\d+)$")
+ENTITLEMENTS_RE = re.compile(r"^/api/corporate-actions/(\d+)/entitlements$")
+REVIEWS_RE = re.compile(r"^/api/corporate-actions/(\d+)/reviews$")
+CA_ACTION_RE = re.compile(r"^/api/corporate-actions/(\d+)/(freeze|issue)$")
 
 
 def make_handler(service: Any, static_dir: Path):
@@ -61,6 +67,13 @@ def make_handler(service: Any, static_dir: Path):
             else:
                 self._send(500, {"error": "internal_error", "message": "服务内部错误"})
 
+        @staticmethod
+        def _expected_version(body: Dict[str, Any]) -> int:
+            version = body.get("expected_version")
+            if not isinstance(version, int):
+                raise ValidationError("expected_version必须是整数")
+            return version
+
         def do_GET(self) -> None:
             try:
                 parsed = urlparse(self.path)
@@ -87,6 +100,41 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/api/stats":
                     self._send(200, service.stats(self._actor()))
                     return
+                if POSITION_RE.match(parsed.path):
+                    query = parse_qs(parsed.query)
+                    self._send(200, {"items": service.list_positions(
+                        self._actor(),
+                        instrument=query.get("instrument", [None])[0],
+                        limit=int(query.get("limit", ["100"])[0]),
+                    )})
+                    return
+                if CORPORATE_ACTIONS_RE.match(parsed.path):
+                    query = parse_qs(parsed.query)
+                    self._send(200, {"items": service.list_corporate_actions(
+                        self._actor(),
+                        instrument=query.get("instrument", [None])[0],
+                        status=query.get("status", [None])[0],
+                        limit=int(query.get("limit", ["100"])[0]),
+                    )})
+                    return
+                match = CORPORATE_ACTION_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.get_corporate_action(self._actor(), int(match.group(1))))
+                    return
+                match = ENTITLEMENTS_RE.match(parsed.path)
+                if match:
+                    query = parse_qs(parsed.query)
+                    self._send(200, {"items": service.list_entitlements(
+                        self._actor(), int(match.group(1)), status=query.get("status", [None])[0]
+                    )})
+                    return
+                match = REVIEWS_RE.match(parsed.path)
+                if match:
+                    query = parse_qs(parsed.query)
+                    self._send(200, {"items": service.list_instruction_reviews(
+                        self._actor(), int(match.group(1)), status=query.get("status", [None])[0]
+                    )})
+                    return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:
                 self._handle_error(exc)
@@ -101,11 +149,39 @@ def make_handler(service: Any, static_dir: Path):
                     return
                 match = ACTION_RE.match(parsed.path)
                 if match:
-                    version = body.get("expected_version")
-                    if not isinstance(version, int):
-                        raise ValidationError("expected_version必须是整数")
-                    record = service.act(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}))
+                    record = service.act(
+                        self._actor(),
+                        int(match.group(1)),
+                        self._expected_version(body),
+                        match.group(2),
+                        body.get("data", {}),
+                    )
                     self._send(200, record)
+                    return
+                if POSITION_RE.match(parsed.path):
+                    data = body.get("data", body)
+                    if body.get("adjust") is True:
+                        result = service.adjust_position(self._actor(), data)
+                    else:
+                        result = service.create_position(self._actor(), data)
+                    self._send(201, result)
+                    return
+                if CORPORATE_ACTIONS_RE.match(parsed.path):
+                    result = service.create_corporate_action(
+                        self._actor(), body.get("reference", ""), body.get("data", {})
+                    )
+                    self._send(201, result)
+                    return
+                match = CA_ACTION_RE.match(parsed.path)
+                if match:
+                    method = "freeze_corporate_action" if match.group(2) == "freeze" else "issue_corporate_action"
+                    result = getattr(service, method)(
+                        self._actor(),
+                        int(match.group(1)),
+                        self._expected_version(body),
+                        body.get("data", body),
+                    )
+                    self._send(200, result)
                     return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:
